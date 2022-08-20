@@ -1,0 +1,105 @@
+---
+- hosts:
+    - all
+  vars:
+    geoip_dir: "/opt/splunk/share/"
+    geoip_name: "dbip-city-lite.mmdb"
+    geoip_db_url: "https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-City&license_key="
+    geopip_tar_suffix: "&suffix=tar.gz"
+    geoip_sha_suffix: "&suffix=tar.gz.sha256"
+    geoip_db_compressed_file_name: "GeoLite2-City.tar.gz"
+    geoip_db_compressed_checksum_name: "GeoLite2-City.tar.gz.sha256"
+    geoip_db_uncompressed_file_name: "dbip-city-lite.mmdb"
+    local_download_directory: "/Users/zach/repos/ansible-maxmind-splunk/tmp-download" # note, a bug with unarchive requires this to be an absolute path
+    splunk_user: "splunk"
+  tasks:
+    - name: ping (ensure host is pingable and ansible intepreter is valid)
+      action: ping
+    - name: Create geoip directory if it doesn't exist
+      become: yes
+      become_user: root      
+      file:
+        path: "{{ geoip_dir }}"
+        state: directory
+        mode: 0755
+    - name: "Get {{ geoip_name }} sha256 checksum"
+      become: yes
+      become_user: root  
+      stat:
+        path: "{{ geoip_dir + geoip_name }}"
+        checksum_algorithm: sha256
+        get_checksum: yes
+      register: st
+    - debug:
+         var: st.stat.checksum
+    - name: "create temp directory {{ local_download_directory }}"
+      become: false
+      local_action:
+        module: file
+        path: "./{{ local_download_directory }}"
+        state: directory
+        mode: 0755
+    - name: "Download the latest GeoIP file locally"
+      local_action:
+         module: get_url
+         url: "{{ geoip_db_url + maxmind_key + geopip_tar_suffix }}"
+         dest: "{{ local_download_directory + '/' + geoip_db_compressed_file_name }}"
+         mode: 0755
+    - name: "Download the latest GeoIP checksum locally"
+      local_action:
+         module: get_url
+         url: "{{ geoip_db_url + maxmind_key + geoip_sha_suffix }}"
+         dest: "{{ local_download_directory + '/' + geoip_db_compressed_checksum_name }}"
+         mode: 0755
+    - name: get checksum value of "{{ local_download_directory + '/' + geoip_db_compressed_checksum_name }}"
+      become: false
+      local_action: shell awk '{print $1}' "{{ local_download_directory + '/' + geoip_db_compressed_checksum_name }}"
+      register: command_output
+    - debug: 
+        var: command_output.stdout_lines[0]
+    - name: "retrieve value from downloaded sha256 checksum for comparison"
+      local_action: 
+        module: stat
+        path: "{{ local_download_directory + '/' + geoip_db_compressed_file_name }}"
+        checksum_algorithm: sha256
+        get_checksum: yes
+      register: dl
+    - debug:
+         var: dl.stat.checksum
+    - name: Extract tar.gz
+      local_action: 
+        module: unarchive
+        src: "{{ local_download_directory + '/' + geoip_db_compressed_file_name }}"
+        dest: "{{ local_download_directory + '/' }}"
+      when: dl.stat.checksum == command_output.stdout_lines[0]
+    - name: find extracted db
+      local_action: shell ls -1 {{ local_download_directory + '/' }}GeoLite2-City_*/GeoLite2-City.mmdb
+      register: result
+    - debug:
+        var: result.stdout
+    - name: "get checksum of extracted {{ result.stdout }}"
+      local_action: 
+        module: stat
+        path: "{{ result.stdout }}"
+        checksum_algorithm: sha256
+        get_checksum: yes
+      register: extract
+    - debug:
+         var: extract.stat.checksum
+    - name: rsync local geodb to destination hosts
+      become: yes
+      become_user: root 
+      ansible.posix.synchronize:
+        src: "{{ result.stdout }}"
+        dest: "{{ geoip_dir + geoip_name }}"
+      when: dl.stat.checksum == command_output.stdout_lines[0]
+    - name: "get {{ geoip_name }} sha256 checksum (after deployment)"
+      become: yes
+      become_user: root  
+      stat:
+        path: "{{ geoip_dir + geoip_name }}"
+        checksum_algorithm: sha256
+        get_checksum: yes
+      register: st
+    - debug:
+         var: st.stat.checksum
